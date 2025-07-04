@@ -37,6 +37,7 @@ type Config struct {
 
 type RegionState struct {
 	info       types.RegionInfo
+	locations  []*Location
 	popLatency []float64
 }
 
@@ -56,6 +57,7 @@ type GslbCore struct {
 	popstate []*types.PoPStatus
 	regions  []*RegionState
 	serial   uint32
+	geo      *GeoService
 }
 
 func New(cfg *Config) *GslbCore {
@@ -114,6 +116,17 @@ func (c *GslbCore) Run(ctx context.Context) error {
 		}
 	}
 
+	// Setup GeoIP Service
+	c.geo = &GeoService{}
+	if err := c.geo.Init(); err != nil {
+		return err
+	}
+	defer c.geo.Close()
+	for _, r := range c.regions {
+		r.locations = c.geo.GetLocations(r.info.Prefices)
+	}
+	c.displayNetworkInfo()
+
 	for {
 		ctxU, cancel := context.WithTimeout(ctx, 10*time.Second)
 		c.UpdatePoPStatus(ctxU)
@@ -126,8 +139,7 @@ func (c *GslbCore) Run(ctx context.Context) error {
 		// sleep for 30 seconds, or stop running if the context is done
 		select {
 		case <-time.After(30 * time.Second):
-			break
-
+			continue
 		case <-ctx.Done():
 			err := ctx.Err()
 			if !errors.Is(err, context.Canceled) {
@@ -136,6 +148,23 @@ func (c *GslbCore) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func (c *GslbCore) displayNetworkInfo() {
+	fmt.Println("///////////////////////////////////////////")
+	fmt.Println("regions:", len(c.regions))
+	for i, r := range c.regions {
+		fmt.Println("region", i, ":", r.info.Id, r.info.ProberURL)
+		fmt.Println("  prefices:")
+		for j, p := range r.info.Prefices {
+			fmt.Println("    ", p.String(), "location:", r.locations[j])
+		}
+		fmt.Println("  popLatency:")
+		for j, lat := range r.popLatency {
+			fmt.Printf("    pop %d: %s latency: %.2f ms\n", j, c.cfg.Pops[j].Id, lat)
+		}
+	}
+	fmt.Println("///////////////////////////////////////////")
 }
 
 func (c *GslbCore) UpdatePoPStatus(ctx context.Context) {
@@ -219,37 +248,23 @@ func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 	defer c.mu.Unlock()
 
 	// FIXME(student): Implement your own query logic
-	fmt.Println("///////////////////////////////////////////")
-	fmt.Println("regions:", len(c.regions))
-	for i, r := range c.regions {
-		fmt.Println("region", i, ":", r.info.Id, r.info.ProberURL)
-		fmt.Println("  prefices:")
-		for _, p := range r.info.Prefices {
-			fmt.Println("    ", p.String())
-		}
-		fmt.Println("  popLatency:")
-		for j, lat := range r.popLatency {
-			fmt.Printf("    pop %d: %s latency: %.2f ms\n", j, c.cfg.Pops[j].Id, lat)
-		}
+	record, err := c.geo.City(srcIP)
+	if err != nil {
+		return []netip.Addr{c.cfg.Pops[0].Ip4}
 	}
-	fmt.Println("///////////////////////////////////////////")
+	srcLoc := NewLocationFromGeoIP2(record)
 
 	nearestRegion := c.regions[0]
-	maxCommonLen := 0
+	var minDist *float64 = nil
 	// 最も近いリージョンを探す
 	for _, r := range c.regions {
-		for _, prefix := range r.info.Prefices {
-			// if prefix.Contains(srcIP) {
-			// 	nearestRegion = r
-			// 	break
-			// }
-			l := c.commonPrefixLength(prefix.Addr(), srcIP)
-			if maxCommonLen < l {
-				nearestRegion = r
-				maxCommonLen = l
-			}
+		d := c.calcRegionDistance(r, srcLoc)
+		if minDist == nil || d < *minDist {
+			nearestRegion = r
+			minDist = &d
 		}
 	}
+	fmt.Println("srcLoc:", srcLoc, "nearestRegion:", nearestRegion.info.Id, "minDist:", *minDist)
 	// そのリージョンから最も近いPoPを探す
 	min_idx := 0
 	for idx, lat := range nearestRegion.popLatency {
@@ -259,6 +274,14 @@ func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 	}
 	return []netip.Addr{c.cfg.Pops[min_idx].Ip4}
 
+}
+
+func (c *GslbCore) calcRegionDistance(region *RegionState, srcLoc *Location) float64 {
+	preficesAverage := AverageLocation(region.locations)
+	dist := srcLoc.Distance(preficesAverage)
+
+	fmt.Println("region:", region.info.Id, "Location:", preficesAverage, "dist:", dist)
+	return dist
 }
 
 func (c *GslbCore) commonPrefixLength(a, b netip.Addr) int {

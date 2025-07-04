@@ -1,6 +1,6 @@
 module github.com/yzp0n/ncdn
 
-go 1.23.0
+go 1.24
 
 toolchain go1.24.3
 
@@ -27,6 +27,8 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/onsi/ginkgo/v2 v2.22.1 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
+	github.com/oschwald/geoip2-golang/v2 v2.0.0-beta.2 // indirect
+	github.com/oschwald/maxminddb-golang/v2 v2.0.0-beta.3 // indirect
 	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.64.0 // indirect
