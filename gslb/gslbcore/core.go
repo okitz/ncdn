@@ -3,7 +3,9 @@ package gslbcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math/bits"
 	"net/netip"
 	"sync"
 	"time"
@@ -217,5 +219,60 @@ func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 	defer c.mu.Unlock()
 
 	// FIXME(student): Implement your own query logic
-	return []netip.Addr{c.cfg.Pops[0].Ip4}
+	fmt.Println("///////////////////////////////////////////")
+	fmt.Println("regions:", len(c.regions))
+	for i, r := range c.regions {
+		fmt.Println("region", i, ":", r.info.Id, r.info.ProberURL)
+		fmt.Println("  prefices:")
+		for _, p := range r.info.Prefices {
+			fmt.Println("    ", p.String())
+		}
+		fmt.Println("  popLatency:")
+		for j, lat := range r.popLatency {
+			fmt.Printf("    pop %d: %s latency: %.2f ms\n", j, c.cfg.Pops[j].Id, lat)
+		}
+	}
+	fmt.Println("///////////////////////////////////////////")
+
+	nearestRegion := c.regions[0]
+	maxCommonLen := 0
+	// 最も近いリージョンを探す
+	for _, r := range c.regions {
+		for _, prefix := range r.info.Prefices {
+			// if prefix.Contains(srcIP) {
+			// 	nearestRegion = r
+			// 	break
+			// }
+			l := c.commonPrefixLength(prefix.Addr(), srcIP)
+			if maxCommonLen < l {
+				nearestRegion = r
+				maxCommonLen = l
+			}
+		}
+	}
+	// そのリージョンから最も近いPoPを探す
+	min_idx := 0
+	for idx, lat := range nearestRegion.popLatency {
+		if lat < nearestRegion.popLatency[min_idx] {
+			min_idx = idx
+		}
+	}
+	return []netip.Addr{c.cfg.Pops[min_idx].Ip4}
+
+}
+
+func (c *GslbCore) commonPrefixLength(a, b netip.Addr) int {
+	// aとbの共通プレフィックスの長さを計算する
+	commonLen := 0
+	as := a.AsSlice()
+	bs := b.AsSlice()
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		if as[i] == bs[i] {
+			commonLen += 8
+		} else {
+			commonLen += bits.LeadingZeros8(as[i] ^ bs[i])
+			break
+		}
+	}
+	return commonLen
 }
