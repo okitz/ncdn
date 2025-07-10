@@ -53,11 +53,14 @@ type GslbCore struct {
 	fetchPoPStatus FetchPoPStatusFunc
 
 	// Updated by the `GslbCore.Run()` worker. Access to the fields below should be guarded by `mu`.
-	mu       sync.Mutex
-	popstate []*types.PoPStatus
-	regions  []*RegionState
-	serial   uint32
-	geo      *GeoService
+	mu            sync.Mutex
+	popstate      []*types.PoPStatus
+	regions       []*RegionState
+	serial        uint32
+	geo           *GeoService
+	cityLocations []Location
+	popRTTInfos   [][]float64
+	probeRTTInfos [][]float64
 }
 
 func New(cfg *Config) *GslbCore {
@@ -105,6 +108,22 @@ func New(cfg *Config) *GslbCore {
 			popLatency: popLatency,
 		}
 	}
+	var err error
+	c.cityLocations, err = LoadCityLocations("./gslb/data/server_locations.gob")
+	if err != nil {
+		slog.Error("Failed to load city locations", slog.String("error", err.Error()))
+		c.cityLocations = make([]Location, 0)
+	}
+	c.popRTTInfos, err = LoadCityRTTInfos("./gslb/data/pop_rtt_map.gob")
+	if err != nil {
+		slog.Error("Failed to load city RTT infos", slog.String("error", err.Error()))
+		c.popRTTInfos = make([][]float64, 0)
+	}
+	c.probeRTTInfos, err = LoadCityRTTInfos("./gslb/data/probe_rtt_map.gob")
+	if err != nil {
+		slog.Error("Failed to load probe RTT infos", slog.String("error", err.Error()))
+		c.probeRTTInfos = make([][]float64, 0)
+	}
 
 	return c
 }
@@ -123,6 +142,7 @@ func (c *GslbCore) Run(ctx context.Context) error {
 	}
 	defer c.geo.Close()
 	for _, r := range c.regions {
+		fmt.Println("region:", r.info.Id)
 		r.locations = c.geo.GetLocations(r.info.Prefices)
 	}
 	c.displayNetworkInfo()
@@ -252,34 +272,49 @@ func (c *GslbCore) Query(srcIP netip.Addr) []netip.Addr {
 	if err != nil {
 		return []netip.Addr{c.cfg.Pops[0].Ip4}
 	}
-	srcLoc := NewLocationFromGeoIP2(record)
 
-	nearestRegion := c.regions[0]
-	var minDist *float64 = nil
-	// 最も近いリージョンを探す
-	for _, r := range c.regions {
-		d := c.calcRegionDistance(r, srcLoc)
-		if minDist == nil || d < *minDist {
-			nearestRegion = r
-			minDist = &d
+	srcLoc := NewLocationFromGeoIP2(record)
+	nearestCityId, nloc := srcLoc.Nearest(c.cityLocations)
+	fmt.Printf("srcLoc: %f, nearest city: %d %v\n", srcLoc, nearestCityId, nloc)
+
+	// アクセス元から各 PoP/Probe への既存RTTテーブル
+	// source: https://wonderproxy.com/blog/a-day-in-the-life-of-the-internet/
+	// popLat := c.popRTTInfos[nearestCityId]
+	probeLat := c.probeRTTInfos[nearestCityId]
+	// RTTテーブルの値を実測Probeデータに合わせてスケーリング
+	scale := 2.0
+
+	// probe経由の推定レイテンシ
+	predLat := make([]float64, len(c.cfg.Pops))
+	for i, pop := range c.cfg.Pops {
+		var minLat *float64
+		for j, r := range c.regions {
+			l := scale*probeLat[j] + r.popLatency[i]
+			if minLat == nil || l < *minLat {
+				minLat = &l
+			}
+		}
+		predLat[i] = (*minLat)
+		fmt.Printf("%s: %.2f, ", pop.Id, predLat[i])
+	}
+	fmt.Println()
+
+	// レイテンシの推定値が最小のPoPを選択
+	pop_idx := 0
+	var min_lat *float64
+	for i, lat := range predLat {
+		if min_lat == nil || lat < *min_lat {
+			min_lat = &lat
+			pop_idx = i
 		}
 	}
-	fmt.Println("srcLoc:", srcLoc, "nearestRegion:", nearestRegion.info.Id, "minDist:", *minDist)
-	// そのリージョンから最も近いPoPを探す
-	min_idx := 0
-	for idx, lat := range nearestRegion.popLatency {
-		if lat < nearestRegion.popLatency[min_idx] {
-			min_idx = idx
-		}
-	}
-	return []netip.Addr{c.cfg.Pops[min_idx].Ip4}
+	return []netip.Addr{c.cfg.Pops[pop_idx].Ip4}
 
 }
 
 func (c *GslbCore) calcRegionDistance(region *RegionState, srcLoc *Location) float64 {
 	preficesAverage := AverageLocation(region.locations)
 	dist := srcLoc.Distance(preficesAverage)
-
 	fmt.Println("region:", region.info.Id, "Location:", preficesAverage, "dist:", dist)
 	return dist
 }

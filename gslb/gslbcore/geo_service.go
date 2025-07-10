@@ -50,6 +50,33 @@ func (l Location) Distance(m *Location) float64 {
 	return R * c
 }
 
+func (l Location) Nearest(locations []Location) (int, *Location) {
+	if len(locations) == 0 {
+		return -1, &zeroLocation
+	}
+
+	var nearest *Location
+	var nearestIndex int
+	minDistance := MAX_DISTANCE
+
+	for i, loc := range locations {
+		if loc.IsZero() {
+			continue
+		}
+		distance := l.Distance(&loc)
+		if distance < minDistance {
+			minDistance = distance
+			nearestIndex = i
+			nearest = &loc
+		}
+	}
+
+	if nearest == nil {
+		return -1, &zeroLocation
+	}
+	return nearestIndex, nearest
+}
+
 func AverageLocation(locations []*Location) *Location {
 	if len(locations) == 0 {
 		return &zeroLocation
@@ -81,7 +108,7 @@ type GeoService struct {
 
 func (g *GeoService) Init() error {
 	var err error
-	g.db, err = geoip2.Open("data/GeoLite2-City.mmdb")
+	g.db, err = geoip2.Open("gslb/data/GeoLite2-City.mmdb")
 	if err != nil {
 		return err
 	}
@@ -104,12 +131,15 @@ func (g *GeoService) City(ipAddress netip.Addr) (*geoip2.City, error) {
 
 func (g *GeoService) GetLocations(Prefices []netip.Prefix) []*Location {
 	locations := make([]*Location, len(Prefices))
+	fmt.Println("  locations:")
+
 	for i, prefix := range Prefices {
 		record, err := g.db.City(prefix.Addr())
 		if err != nil {
 			locations[i] = &zeroLocation
 			continue
 		}
+		fmt.Println("    ", record)
 		locations[i] = NewLocationFromGeoIP2(record)
 	}
 	return locations
